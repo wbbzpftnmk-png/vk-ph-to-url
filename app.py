@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 VK_API_VERSION = "5.131"
 
-APP_DATA_DIR = Path.home() / "Library" / "Application Support" / "VK Album Photo URLs"
+APP_DATA_DIR = Path.home() / "Library" / "Application Support" / "vk ph to url"
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 TOKENS_FILE = APP_DATA_DIR / "vk_tokens.json"
 HISTORY_FILE = APP_DATA_DIR / "album_history.json"
@@ -20,7 +20,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VK Album Photo URLs</title>
+  <title>vk ph to url</title>
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;
@@ -129,7 +129,7 @@ HTML = """
     Захаров Максим · <a href="http://t.me/ph_zakharov_m" target="_blank" rel="noopener noreferrer">t.me/ph_zakharov_m</a>
   </div>
 
-  <h1>VK Album Photo URLs</h1>
+  <h1>vk ph to url</h1>
 
   <div class="box">
     <h2>1. VK API</h2>
@@ -166,9 +166,10 @@ HTML = """
         <h3>Как получить VK API</h3>
         <ol>
           <li>Создайте приложение VK ID и получите access token через OAuth.</li>
-          <li>Выбирайте токен только для той сети, где он будет использоваться.</li>
-          <li>Если сеть или IP меняются, VK может выдать ошибку привязки токена к IP.</li>
-          <li>После авторизации скопируйте access token из адресной строки.</li>
+          <li>Каждый API может быть привязан к своей сети и IP-адресу.</li>
+          <li>Если вы поменяете Wi‑Fi, VPN, мобильный интернет или место работы, старый токен может перестать работать.</li>
+          <li>После авторизации скопируйте access token из адресной строки браузера.</li>
+          <li>Для этой программы лучше хранить отдельный API под каждую сеть, где вы будете её запускать.</li>
         </ol>
         <p>
           Официальные ссылки:
@@ -181,7 +182,7 @@ HTML = """
           <code>https://oauth.vk.com/authorize?client_id=ВАШ_CLIENT_ID&display=page&redirect_uri=https://oauth.vk.com/blank.html&scope=photos&response_type=token&v=5.131</code>
         </p>
         <p class="small">
-          Важно: каждый API может быть привязан к своей сети и IP, поэтому не переносите один и тот же токен между разными Wi‑Fi, VPN или мобильным интернетом.
+          Важно: если появится ошибка про другой IP-адрес, значит токен привязан к другой сети. Нужно получить новый API именно в той сети, где он будет использоваться.
         </p>
       </div>
     </div>
@@ -398,23 +399,29 @@ def get_selected_token():
                 return t
     return tokens[0]
 
-def verify_token(token):
-    params = {"access_token": token, "v": VK_API_VERSION}
-    r = requests.get("https://api.vk.com/method/users.get", params=params, timeout=20)
+def vk_request(method, token, **params):
+    params.update({"access_token": token, "v": VK_API_VERSION})
+    r = requests.get(f"https://api.vk.com/method/{method}", params=params, timeout=30)
     data = r.json()
     if "error" in data:
-        msg = data["error"].get("error_msg", "VK API error")
+        raise ValueError(data["error"].get("error_msg", "VK API error"))
+    return data.get("response")
+
+def verify_token(token):
+    try:
+        vk_request("users.get", token)
+    except ValueError as e:
+        msg = str(e)
         if "another ip address" in msg.lower():
             raise ValueError("Этот API привязан к другой сети или IP-адресу. Используйте токен, полученный в текущей сети.")
-        raise ValueError(msg)
+        raise
     return True
 
 def parse_album_link(url):
     if not url:
         return None
-    url = url.strip().rstrip("/")
-    last_part = url.split("/")[-1]
-    m = re.match(r"^album(-?\d+)_([0-9]+)$", last_part)
+    url = url.strip().rstrip("/").replace("\\/", "/")
+    m = re.search(r"album(-?\d+)_([0-9]+)$", url)
     if not m:
         return None
     return m.group(1), m.group(2)
@@ -429,53 +436,37 @@ def choose_best_url(photo):
         return best.get("url", "")
     return ""
 
+def get_album_title(owner_id, album_id, token):
+    try:
+        response = vk_request("photos.getAlbums", token, owner_id=owner_id, album_ids=album_id)
+        if isinstance(response, dict):
+            items = response.get("items", [])
+        else:
+            items = response or []
+        if items:
+            return items[0].get("title", "") or ""
+    except Exception:
+        pass
+    return ""
+
 def get_all_photos(owner_id, album_id, token):
-    all_items = []
+    response = vk_request("photos.get", token, owner_id=owner_id, album_id=album_id, count=1, offset=0)
+    total = response.get("count", 0) if isinstance(response, dict) else 0
+    items = []
     offset = 0
-    count = 200
+    limit = 1000
 
     while True:
-        params = {
-            "owner_id": owner_id,
-            "album_id": album_id,
-            "count": count,
-            "offset": offset,
-            "access_token": token,
-            "v": VK_API_VERSION,
-        }
-        r = requests.get("https://api.vk.com/method/photos.get", params=params, timeout=30)
-        data = r.json()
-
-        if "error" in data:
-            raise Exception(data["error"].get("error_msg", "VK API error"))
-
-        response = data.get("response", {})
-        items = response.get("items", [])
-        total = response.get("count", 0)
-
-        all_items.extend(items)
-        offset += len(items)
-
-        if offset >= total or not items:
+        response = vk_request("photos.get", token, owner_id=owner_id, album_id=album_id, count=100, offset=offset)
+        batch = response.get("items", []) if isinstance(response, dict) else []
+        if not batch:
+            break
+        items.extend(batch)
+        offset += len(batch)
+        if offset >= total or offset >= limit:
             break
 
-    return all_items, total
-
-def get_album_title(owner_id, album_id, token):
-    params = {
-        "owner_id": owner_id,
-        "album_id": album_id,
-        "access_token": token,
-        "v": VK_API_VERSION,
-    }
-    r = requests.get("https://api.vk.com/method/photos.getAlbums", params=params, timeout=20)
-    data = r.json()
-    if "error" in data:
-        return ""
-    response = data.get("response", [])
-    if response:
-        return response[0].get("title", "") or ""
-    return ""
+    return items, total
 
 def build_album_data(album_url, token):
     if not token:
